@@ -2,13 +2,13 @@
 
 BOOST_AFIO_AUTO_TEST_CASE(path_works, "Tests that the path functions work as they are supposed to", 20)
 {
-    using namespace BOOST_AFIO_V1_NAMESPACE;
-    auto dispatcher = make_async_file_io_dispatcher();
-    auto dirh = dispatcher->dir(async_path_op_req("testdir", file_flags::Create));
-    dirh.get();
-    {
+  using namespace BOOST_AFIO_V1_NAMESPACE;
+  auto dispatcher = make_async_file_io_dispatcher();
+  auto dirh = dispatcher->dir(async_path_op_req("testdir", file_flags::Create));
+  dirh.get();
+  {
 #ifdef WIN32
-#define BOOST_AFIO_PATH_WORKS_STR(s) L ## s
+#define BOOST_AFIO_PATH_WORKS_STR(s) L##s
 #else
 #define BOOST_AFIO_PATH_WORKS_STR(s) s
 #endif
@@ -43,7 +43,7 @@ BOOST_AFIO_AUTO_TEST_CASE(path_works, "Tests that the path functions work as the
       // Filesystem has been known to return lower case drive letters ...
       std::transform(a.begin(), a.end(), a.begin(), ::tolower);
       std::transform(b.begin(), b.end(), b.begin(), ::tolower);
-      if (b.size() >= 260)
+      if(b.size() >= 260)
         b = L"\\\\?\\" + b;
       std::wcout << a << " (sized " << a.size() << ")" << std::endl;
       std::wcout << b << " (sized " << b.size() << ")" << std::endl;
@@ -76,7 +76,7 @@ BOOST_AFIO_AUTO_TEST_CASE(path_works, "Tests that the path functions work as the
       BOOST_CHECK(h->path() == BOOST_AFIO_V1_NAMESPACE::path());
       std::cout << "\nEnumerating directory to make sure hellobaby is not there ..." << std::endl;
       auto contents = dispatcher->enumerate(async_enumerate_op_req(dirh, metadata_flags::All, 50)).first.get().first;
-      for (auto &i : contents)
+      for(auto &i : contents)
       {
         std::cout << "  " << i.name() << std::endl;
 #ifndef WIN32  // Windows only marks for deletion, doesn't actually delete
@@ -89,18 +89,18 @@ BOOST_AFIO_AUTO_TEST_CASE(path_works, "Tests that the path functions work as the
     std::shared_ptr<async_io_handle> h;
     async_io_op op = dispatcher->file(async_path_op_req::relative(dirh, testfilestr, file_flags::Create | file_flags::ReadWrite));
     h = op.get();
-    BOOST_CHECK(h->path(true)==dirh->path()/testfilestr);
+    BOOST_CHECK(h->path(true) == dirh->path() / testfilestr);
     h->link(async_path_op_req::relative(dirh, "testfile2"));
-    BOOST_CHECK(h->path(true)==dirh->path()/testfilestr);
+    BOOST_CHECK(h->path(true) == dirh->path() / testfilestr);
     h->link(async_path_op_req::relative(dirh, "testfile3"));
-    BOOST_CHECK(h->path(true)==dirh->path()/testfilestr);
+    BOOST_CHECK(h->path(true) == dirh->path() / testfilestr);
     dispatcher->truncate(op, 78).get();
     dispatcher->sync(op).get();
     auto entry = h->lstat();
     BOOST_CHECK(entry.st_size == 78);
     auto contents = dispatcher->enumerate(async_enumerate_op_req(dirh, metadata_flags::All, 50)).first.get().first;
     BOOST_CHECK(contents.size() == 3);
-    for (auto &i : contents)
+    for(auto &i : contents)
     {
       print_stat(dirh.get(), i);
       BOOST_CHECK(i.st_ino() == entry.st_ino);
@@ -112,14 +112,14 @@ BOOST_AFIO_AUTO_TEST_CASE(path_works, "Tests that the path functions work as the
 
     std::cout << "\nRelinking hard link testfile to foo ..." << std::endl;
     h->atomic_relink(async_path_op_req::relative(dirh, foostr));
-    BOOST_CHECK(h->path(true)==dirh->path()/foostr);
+    BOOST_CHECK(h->path(true) == dirh->path() / foostr);
     dispatcher->truncate(op, 79).get();
     dispatcher->sync(op).get();
     entry = h->lstat();
     BOOST_CHECK(entry.st_size == 79);
     contents = dispatcher->enumerate(async_enumerate_op_req(dirh, metadata_flags::All, 50)).first.get().first;
     BOOST_CHECK(contents.size() == 3);
-    for (auto &i : contents)
+    for(auto &i : contents)
     {
       print_stat(dirh.get(), i);
       BOOST_CHECK(i.name() != testfilestr);
@@ -137,17 +137,17 @@ BOOST_AFIO_AUTO_TEST_CASE(path_works, "Tests that the path functions work as the
 #endif
     contents = dispatcher->enumerate(async_enumerate_op_req(dirh, metadata_flags::All, 50)).first.get().first;
     BOOST_CHECK(contents.size() == 2);
-    for (auto &i : contents)
+    for(auto &i : contents)
     {
       print_stat(dirh.get(), i);
-      BOOST_CHECK(i.name() != foostr); // This should get filtered out by AFIO on Windows due to magic naming
+      BOOST_CHECK(i.name() != foostr);  // This should get filtered out by AFIO on Windows due to magic naming
       BOOST_CHECK(i.st_nlink() == 2);
     }
     op = async_io_op();
-    h.reset(); // Should actually cause the unlink to really happen on Windows
+    h.reset();  // Should actually cause the unlink to really happen on Windows
     contents = dispatcher->enumerate(async_enumerate_op_req(dirh, metadata_flags::All, 50)).first.get().first;
     BOOST_CHECK(contents.size() == 2);
-    for (auto &i : contents)
+    for(auto &i : contents)
     {
       print_stat(dirh.get(), i);
       BOOST_CHECK(i.name() != foostr);
@@ -157,9 +157,9 @@ BOOST_AFIO_AUTO_TEST_CASE(path_works, "Tests that the path functions work as the
     dispatcher->rmfile(async_path_op_req::relative(dirh, "testfile3")).get();
     contents = dispatcher->enumerate(async_enumerate_op_req(dirh, metadata_flags::All, 50)).first.get().first;
     BOOST_CHECK(contents.size() == 0);
-    }
+  }
 
-    // Reopen with write privs in order to unlink
-    dirh = dispatcher->dir(async_path_op_req("testdir", file_flags::ReadWrite));
-    dirh->unlink();
+  // Reopen with write privs in order to unlink
+  dirh = dispatcher->dir(async_path_op_req("testdir", file_flags::ReadWrite));
+  dirh->unlink();
 }
