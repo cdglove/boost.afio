@@ -1,0 +1,555 @@
+[/============================================================================
+  Boost.AFIO
+
+  Use, modification and distribution is subject to the Boost Software License,
+  Version 1.0. (See accompanying file LICENSE_1_0.txt or copy at
+  http://www.boost.org/LICENSE_1_0.txt)
+=============================================================================/]
+
+[section:quickstart Quick Start]
+
+So why bother with __boost_afio__? What's wrong with the STL iostreams and Filesystem?
+
+The answer is that there is nothing wrong with either for 95% of use cases. Performance
+of both is pretty good in fact most of the time __dash__ which actually isn't that
+surprising as C++ is a pay-for-what-you-use systems language. If however you have ever
+experienced any of these problems, then AFIO may be useful to you:
+
+# Your spinning magnetic rust hard drive goes bananas when some routine in your code
+  tries to do something to storage, and latency per op starts heading into the seconds range.
+
+# Your super fast SSD which is supposed to be delivering hundreds of thousands of ops/sec
+  is barely managing a tenth of its supposed ability with your code. After reading about the
+  importance of high queue depth to maximising performance from SSDs, you try opening many
+  handles to the same file and firing an army of thread pool workers at the problem to try
+  and increase queue depth, but your performance actually drops over the single threaded case.
+
+# Your code has to interact with a regularly changing filesystem and not get weird race errors e.g. you
+  try to create a new file in path /X/Y/Z, but some other program has just renamed directory /X/Y
+  to /A/B in the time between you deciding on /X/Y/Z and getting round to it.
+
+# Your code keeps file handles open a long time in a place where others might delete or rename
+  them, including any part of the directory hierarchy preceding the file.
+  
+# Deleting directory trees randomly fails on Microsoft Windows for no obvious reason.
+
+# Your code needs to read and write files concurrently to other code without resorting to
+  shared memory region tricks e.g. if the files reside on a Samba or NFS network shared drive.
+
+# Your CPU needs to be doing more useful work instead of copying memory to and from disc i/o
+  buffers. As great as the STL iostream buffering is, unless disabled it doubles the LL cache
+  pressure on your CPU, evicting other more useful data. The STL iostreams design almost certainly won't
+  allow the kernel use VM tricks to directly busmaster DMA from its buffers to the hard drive, so
+  the kernel will have to copy those buffers a third time. That means that for every 1Kb you read
+  or write you are evicted, as a minimum, 3Kb from the LL caches in your CPU, all of which must be
+  refilled with more useful data later.
+
+# Your code wants to experience various filing system features identically across platforms which
+  also work on shared Samba and NFS network drives, such as:
+  * Deleting and renaming open files.
+  * Files having unique inode values.
+  * POSIX timestamping of last accessed, last modified, last status changed and created.
+  * File extent management and traversal.
+  * Explicitly documented filing system race guarantees.
+  * Interrogation of filing system characteristics, devices and mount points.
+  * Ten million item directories, or more. We have tested twenty five million item directories on NTFS
+    and ext4 and performance was actually tolerable with under a second pause. Ten million item directories is plenty fast, and
+    one million item directories you won't notice over a ten item directory. Note that your GUI file
+    explorer will very likely hang on ten million item directories, indeed so do most command line tools.
+  * Exclusive lock files (manually operated support already there, async support coming in v1.4).
+  * File change monitoring (coming in v1.4).
+  * File byte range advisory locking (coming in v1.4).
+ 
+You'll probably note that these are POSIX file semantics. On Microsoft Windows, AFIO directly uses
+the NT kernel API and can therefore achieve reasonably accurate POSIX file semantics, at the cost of
+no support for DOS feature emulation like short names or case insensitivity or drive letters. Going directly to the
+NT kernel makes filing system performance on Windows both much faster and a close experience
+to coding for POSIX, this saves you time and money and produces a much more consistent experience
+for your users.
+
+A surprising amount of production code out there is highly unreliable when used on a filing
+system experiencing rapid change, or even just a filing system mounted on a network. In many
+ways it is when your code needs to ["grow up] from assuming a never changing static filesystem
+into a more realistic model is when you ought to reach AFIO which has hopefully abstracted away
+all those tedious platform specific and filing system specific quirks for you.
+
+Using __boost_afio__ is centred around the __afio_dispatcher__ abstract base class,
+whose underlying platform-specific implementation class is instantiated using the
+[link afio.reference.functions.make_async_file_io_dispatcher `make_async_file_io_dispatcher()`]
+factory function. Once you have a `std::shared_ptr<async_file_io_dispatcher_base>`,
+you simply call its member functions to have the dispatcher schedule asynchronous
+work items for you, each returning a __afio_op__. Note that dispatchers can be
+specialised with specific flags, so you could have one dispatcher which always
+fsyncs its files on close and another which does not. You can then schedule operations to
+the appropriate dispatcher. Currently you cannot chain operations across schedulers, this
+facility is expected to come with the coroutine support in v1.4.
+
+All AFIO scheduling functions, or the convenience structures they take in, will
+take as a (sometimes optional) first parameter their precondition op. Only when that
+precondition has finished executing will its dependencies become scheduled for
+execution. This makes expanding out multiple ops from a single precondition easy,
+but what about reducing multiple ops down to a single precondition? For that, use
+__afio_barrier__.
+
+AFIO itself throws almost no exceptions apart from `std::invalid_argument`, though it
+can throw fatal exceptions when you're doing something unwise (and make sure to check
+the FAQ if you do see a fatal exception, it will explain what you're doing wrong). It
+does trap all operating system errors, reporting these as the appropriate `std::system_error`
+when code next gathers error state from that operation (usually using `when_all()` or `get()`). One
+can of course also receive exceptions thrown by anything AFIO calls (the STL, Boost etc).
+AFIO is thought to be exception safe, except when `std::bad_alloc` is thrown.
+
+Note that from v1.4, AFIO will only throw exceptions for extraordinary events, and will
+instead directly return error codes for most errors.
+
+[section:hello_world Hello World, asynchronously!]
+
+We might as well jump straight in: on the left is a traditional STL iostreams
+implementation with its equivalent in AFIO using single-shot functions (i.e. a batch
+of one) on the right.
+
+[table:hello_world Traditional STL iostreams and AFIO side by side
+  [[[readwrite_example_traditional]][[readwrite_example]]]
+]
+
+For reference, that's 16 lines of code on the left as compared to 21 lines of
+code on the right (three of which could be easily eliminated too). Admittedly the
+lines are a lot longer, and maybe less intuitive looking, but programming against
+AFIO is certainly compact!
+
+This compactness of expression is not by accident: AFIO's API is intended as a sort
+of domain specific embedded language (DSEL) for asynchronous file i/o because it's
+hard enough writing power-loss safe sequencing of filing system operations without
+having to mess around with boilerplate. AFIO's API lets you see more clearly what
+happens in what sequence with a minimum of vertical real estate needed (unlike
+Windows NT asynchronous file i/o programming in particular). In v1.4 we expect to
+add support for Fiber programming, this ought to make writing AFIO code even easier!
+
+As you'll note from the bookmarked lines on the right, generally the first parameter
+into any AFIO function is the precondition op (of type __afio_op__) which must complete before the op being
+scheduled now is allowed to begin. Precondition ops don't just enforce execution order
+however, they also carry a file handle or more accurately, a ['shared future] to a
+shared pointer to a __afio_handle__ which by definition will be ready by the time your
+dependency is executed. Let's take a very quick look at `async_io_op`:
+
+	struct async_io_op
+	{
+		async_file_io_dispatcher_base *parent;                              //!< The parent dispatcher
+		size_t id;                                                          //!< A unique id for this operation
+		shared_future<std::shared_ptr<async_io_handle>> h;                  //!< A future handle to the item being operated upon
+	};
+  
+Note that in v1.4 async_io_op will be replaced with afio::future<void>.
+  
+So, because there can be many op references to an op, `h` is a shared pointer to a unique shared future,
+one of which exists per unique integer id. Right now AFIO keeps a pointer to a parent
+as well in case future AFIO's can chain ops across dispatcher instances, but for now
+it simply tells you which dispatcher the op is or was scheduled with.
+
+The shared future is valid as soon as an op is sent for execution to the thread source (which may not occur
+until after any preconditions have completed), and its result (the handle output
+by the scheduled operation) becomes available when the operation completes. If there are any
+dependencies scheduled on the operation, on completion the output handle is sent as input
+to each of dependencies.
+
+What this means is straightforward: in the example above `file()` outputs on completion
+an open file handle which is fed to `truncate()` which on completion feeds the same input
+handle to `write()` and so on. `close()` takes in the open file handle, closes it, and
+outputs a null file handle on completion to `rmfile()` which doesn't use its input file
+handle as it takes a path instead.
+
+Note that [*errors do not propagate] except under limited circumstances. If `truncate()`
+failed let's say due to lack of free space, no error state is propagated to `write()`
+(though that would surely not succeed as async writing cannot go past the current
+extent of a file). If `open()` failed, its output file handle would be null and therefore
+every subsequent action would almost certainly also fail, but the sequence of scheduled
+operations [*always] executes, regardless. In fact, in the present version of AFIO there
+is no way whatsoever to cancel a scheduled operation __dash__ AFIO is a pure future forwards
+scheduler.
+
+Note how we gather exceptions from ops in the `when_all()` using an initialiser list.
+We can also call `get()` directly on the op. Not fetching an op's state is equivalent to not checking it for an error.
+If you just want to wait for it to complete and not rethrow any exceptions encountered,
+there is a `when_all(std::nothrow_t(), ...)` overload available.
+
+[endsect] [/hello_world]
+
+[section:file_concat A less toy example: Concatenating files]
+
+The Hello World example didn't really demonstrate why using AFIO is any better than using
+STL iostreams. The final example in this quick start will give a ["real world] and unfortunately
+somewhat overwhelming in complexity example of how
+AFIO can run rings around STL iostreams (complete with benchmarks!), so as an intermediate
+__dash__ and hopefully not as overwhelming __dash__
+step here is a simple file copy utility which can also concatenate multiple source files
+into a destination file[footnote My thanks to Artur Laksberg, Dev Lead of the Microsoft
+Visual C++ Parallel Libraries team, for suggesting this as a good demonstration of an
+asynchronous file i/o library. I had been until then quite stumped for an intermediate
+quick start example between the first and last examples.].
+
+[filecopy_example]
+
+This example consists of a function called `async_concatenate_files()` which will 
+asynchronously append those file paths in ['sources] into the file path in ['dest], with
+the `main()` function simply parsing arguments and printing progress every second.
+I won't explain the example hugely __dash__ it's pretty straightforward, it simply
+parallel reads all source files in `chunk_size` chunks, writing them to their appropriate
+offset into the output file. It
+is a very good example, incidentally, of why C++11 is like a whole new language over
+C++98 even for simple systems programming tasks like this one.
+
+You may note that the temporary buffers for each chunk are allocated using a special
+`file_buffer_allocator`. If your operating system allows it, regions of memory returned
+by this allocator have the maximum possible scatter gather DMA efficiency possible.
+Even if your operating system doesn't allow it, it does no harm to use this allocator
+instead of the system allocator.
+
+The chances are that this file copying implementation would be little faster than a naive
+implementation however (unless the source files are on different physical devices, in which
+case you'd see maximum performance). Some might also argue that firing a consumer producer thread per source
+file would be just as easy, albeit that output file position management across threads
+might be slightly tricky.
+
+Let us start into where the AFIO implementation starts to deliver real value add: a multiprocess safe log file and
+finding which files in a directory tree contain a regular expression.
+
+[endsect] [/file_concat]
+
+[section:atomic_logging Achieving atomicity on the filing system]
+
+__triplegit__, the forthcoming reliable graph database store, ideally needs to allow multiple processes to
+concurrently read and write the graph store without mutual exclusion where possible. Each collection of hashes which form
+the tree which makes up some given version of the graph is itself a hashed object in the content
+addressable store, and you can have multiple named graphs in the graph store which may or may not
+share nodes. One problem as with all databases is how to efficiently issue an atomic transaction
+which updates multiple graphs simultaneously and atomically when there is the potential of concurrent
+writers also trying to issue write transactions which may, or may not, cause conflict with other
+transactions.
+
+The really naive solution is to keep a single lock file which is created using O_EXCL i.e. fail
+if you didn't create the file for the entire graph store. This serialises
+all transactions, and therefore eliminates any problems with updates clashing. This is usefully
+well supported by all operating systems, and by NFS and Samba.
+
+A less naive solution is to keep one lock file per graph, and to
+use a multiple lock and backoff strategy to lock the requisite number of graphs for some given
+transaction. The big problem with this approach is that you are unfairly penalised for especially large multi-graph transactions over others
+with smaller transactions as lock complexity is worse than linear. Nevertheless performance is actually not bad: these are results for my 3.9Ghz i7-3770K workstation
+using AFIO to implement the lock file with various numbers of concurrent writers (note that Windows provides magic
+flags for telling it about lock files, if not used expect a 40% performance reduction):
+
+[table:lock_file_performance Lock file performance on various operating systems:
+  [[writers][lock files][Win8.1 x64 NTFS HD][Win8.1 x64 NTFS SSD][Linux x64 ext4 SSD][FreeBSD 10.1 ZFS SSD]]
+  [[1][1][2468][2295][3590][9922]]
+  [[2][1][2507][2385][3583][9903]]
+  [[4][1][1966][2161][3664][9684]]
+  [[8][1][1400][1851][3703][6537]]
+  [[16][1][742][602][3833][1251]]
+  []
+  [[1][8][826][888][1378][2455]]
+  [[2][8][508][637][576][917]]
+  [[4][8][67][167][417][63]]
+  [[8][8][37][117][106][0.55]]
+  [[16][8][33][77][26][0.5]]
+]
+
+As you can see, Linux does a very good job of O(1) to waiters complexity, but performance on Windows
+and FreeBSD collapses once you exceed CPU cores. Also, Windows is sensitive to device block size __dash__ the
+hard drive outperforms the SSD because it has 512 byte sectors and the SSD has 4096 byte sectors.
+I suspect that internally Windows memcpy()'s in device native sector sizes, or is actually sending
+data to physical storage despite us marking this file as temporary. One very striking observation is
+how FreeBSD is a full 2.76x the performance of Linux and 4.32x that of Windows.
+
+A much more intelligent way of solving this problem is to figure out which graphs are common across each
+of the transactions currently pending, and to strictly order the transactions in the sequence
+which maximises throughput without updates clashing.
+One way of many distributed writers constructing a shared graph of dependencies is to append messages
+into a shared file, and then one can deploy a distributed mutual exclusion algorithm of which those
+by Suzuki and Kasami, Maekawa and Ricart and Agrawala are the most famous. This requires the ability
+to atomically append to the shared file, something guaranteed on all operating systems, but unfortunately
+not guaranteed by NFS nor Samba (though when combined with advisory file locking those do work as
+expected, albeit with poor performance). This means that on an all-Windows setup, or if on POSIX and
+not using NFS nor Samba, the atomic append method could be valuable, especially as the cost of locking
+multiple actors is pretty much the same as locking a single actor so you get eight graphs locked for
+the same cost as locking one.
+
+[table:atomic_append_performance Atomic append lock performance on various operating systems:
+  [[writers][lock files][Win8.1 x64 NTFS HD][Win8.1 x64 NTFS SSD][Linux x64 ext4 SSD][FreeBSD 10.1 ZFS SSD]]
+  [[1][1][2592][2875][1198][29]]
+  [[2][1][1284][2565][1344][25]]
+  [[4][1][1420][2384][1327][35]]
+  [[8][1][1262][1764][1254][55]]
+  [[16][1][428][520][1260][37]]
+]
+
+Linux once against does a great job of O(1) to waiters complexity, but at the third of the speed of
+a simple lock file and up to half the speed of Windows. Windows does better than Linux here especially
+on SSDs where it is faster than a simple lock file, but doesn't scale to waiters once they pass CPU core count.
+FreeBSD is two orders of magnitude slower which is because ZFS checksums and copy on writes file changes,
+so every time we append 16 bytes we are forcing a full copy of the 128Kb extent to be issued. It would
+appear that ZFS syncs its internal buffers when a different file descriptor atomic appends to the same file
+__dash__ this has the above pathological performance outcome unfortunately.
+
+This introduces the final potential solution which is that of the quagmire of advisory file locking.
+This is an area where Windows and POSIX diverge very significantly, and the interactions between
+Windows and POSIX when Windows locks regions in a file on a Samba share on a POSIX machine or when
+POSIX does byte range locking at all (there is a very fun stanza in the POSIX standard which basically
+releases all your locks on first file descriptor close) are full of quirks, races and other nasties.
+For this reason you should avoid the very temporary and experimental code currently in AFIO which
+implements Samba and NFS safe file range locking where theoretically both Windows and POSIX code
+can safely lock ranges in files concurrently, those APIs are not documented for good reason!
+Still, performance with these __dash__ despite the hoop jumping inefficiencies AFIO leaps through
+to implement relatively sane semantics __dash__ is impressive.
+
+[table:advisory_lock_file_performance Advisory lock file performance on various operating systems:
+  [[writers][lock files][Win8.1 x64 NTFS HD][Win8.1 x64 NTFS SSD][Linux x64 ext4 SSD][FreeBSD 10.1 ZFS SSD]]
+  [[1][1][5799][5166][3466][21536]]
+  [[2][1][5788][6656][2215][11654]]
+  [[4][1][5775][7020][1073][5384]]
+  [[8][1][5773][6738][518][2584]]
+  [[16][1][5695][5617][360][1326]]
+]
+
+Fascinatingly the tables suddenly switch here: Windows sees O(1) to waiters complexity, whilst
+Linux and FreeBSD sees a mostly O(N) to waiters complexity drop in performance. FreeBSD, as with the
+simple lock file performance, blows all others out of the water again in advisory lock performance too. I
+should add here that because POSIX advisory locks are per process, the Linux and FreeBSD benchmarks were
+generated by running N copies of the benchmark program whereas the NT kernel inherits the really
+excellent and well thought through file byte range locking model of DEC VMS and treats locks as
+effectively reference counted byte ranges, and therefore works as expected from a single process.
+I have yet to add process-local byte range locking to simulate sane range locking for POSIX, so
+expect the numbers above to worsen.
+
+After all of that, we are left with this locking strategy matrix for __triplegit__:
+
+[table:best_locking_strategy_matrix Fastest file system locking strategy for various operating systems:
+  [[Operating system][Best locking policy]]
+  [[Win8.1 x64 NTFS][Advisory locks fastest, then atomic append locks, finally lock files]]
+  [[Linux x64 ext4][Lock files fastest, then advisory locks, finally atomic append locks]]
+  [[FreeBSD 10.1 ZFS][Advisory locks fastest, then lock files, avoid atomic append locks at all costs]]
+]
+
+I should [*emphasise] once again that the advisory locking code is riddled with bugs and you should
+not use it in your code at this time. Once I have a CI testing all possible combinations of locking
+and nothing is erroring out I'll release that code for production use, probably in v1.4.
+
+All these benchmarks came from this benchmarking program I wrote using AFIO which illustrates how
+you might implement the techniques used above:
+
+[benchmark_atomic_log]
+
+[endsect] [/atomic_logging]
+
+[section:filesystem_races Handling races on the filing system]
+
+Filing systems are a shared resource common to all processes on the system and sometimes the network,
+and are therefore as a globally shared resource inherently racy. Yet overwhelmingly programs, even often those written
+by world expert programmers, singularly assume
+the filing system to be a static, constant and unchanging place only modifiable by the current program,
+as indeed did until very recently the POSIX API standard which defines the common API for Linux, FreeBSD,
+Mac OS X and other Unices.
+When bug reports come in of data being lost, even very large professional corporations can make a real
+hash of testing that their ["fix] isn't worse at losing data than the previous more naive implementation.
+This is because when you program against a mental model of a static, unchanging filesystem you will become
+inevitably surprised when it happens to change at exactly the wrong moment __dash__ which of course is
+a moment you can never replicate on your developer workstation, thus making finding and fixing these
+sorts of bug highly non-trivial.
+
+In case you don't realise how much user data and productivity is lost each year to filing system races,
+just look up ["corrupted Office file] on Google and weep. Even for us programmers, if you try keeping a
+Git repository on a Samba drive expect some interesting, and moreover quite strongly associated to specific
+combinations of client accessing the repo concurrently, object database corruption from time to time.
+
+Well, there is some good news: AFIO makes maximum use of host OS filing system race safeguards, so if you
+write your code against AFIO and take note of the race guarantees section in each individual per-API
+reference documentation page, you should hopefully avoid any possibility of experiencing filing system
+races.
+
+[heading What AFIO provides for managing filing system raciness]
+
+Firstly, readers will probably be quite surprised to learn that the only operating system capable of providing
+completely race free filing system behaviour is Microsoft Windows, or rather the very well designed NT kernel API which AFIO uses directly.
+Linux provides robust file descriptor path discovery and the `XXXat()` POSIX APIs, and with those AFIO can provide pretty
+good race condition safety on Linux up to the final directory in the path.
+Mac OS X provides an unfortunately quite broken file descriptor path discovery, and additionally does not provide the `XXXat()`
+POSIX APIs and so AFIO cannot provide race protection, but can throw exceptions sometimes if it detects the filesystem
+has suddenly changed and you're about to delete the wrong file (you shouldn't rely on this, it's racy). FreeBSD provides the `XXXat()` POSIX APIs, but its file
+descriptor path discovery only works correctly for directory not file handles due to a kernel bug (I've opened
+a feature request ticket for this at [@https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=198570 https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=198570]) and therefore AFIO
+can provide only race condition safety for directories only on FreeBSD.
+
+Additionally, working with the filing system in a race safe way on POSIX requires opening a file descriptor to the
+containing directory for every operation (some proprietary Linux extensions allow this to be avoided for some operations on
+newer Linux kernels). AFIO will keep a global cache of open file handles for containing directories
+on request using the `file_flags::HoldParentOpen` flag which can be enabled per dispatcher or per individual file handle open,
+this very significantly reduces the cost of race condition safety on POSIX ['for file entries only] as directories ignore
+the `file_flags::HoldParentOpen` flag, though at the cost of increased file descriptor usage, which has low hard limits
+especially on OS X which is why it is disabled by default. The alternative if you don't want AFIO to bother with race safety
+is to specify the `file_flags::NoRaceProtection` flag per dispatcher or per individual file handle open, this causes AFIO
+to use the same maximum performance code paths as used before the v1.3 engine.
+
+[heading How to implement filing system race safety on AFIO]
+
+The essential rule for achieving maximum filing system race safety is to avoid using absolute paths where possible. If
+you want your code to also be safe on POSIX, you must additionally only assume race safety up to the final directory in
+a path __dash__ thereafter design your node to never behave racily within a single directory.
+
+The core container type for specifying a location on the filing system to AFIO is __afio_path_op_req__ which looks like this:
+
+    struct async_path_op_req
+    {
+        bool is_relative;              // Whether the precondition is also where this path begins.
+        afio::path path;               // The filing system path to be used for this operation.
+        file_flags flags;              // The flags to be used for this operation (note they can be overriden by flags passed during dispatcher construction).
+        async_io_op precondition;      // An optional precondition for this operation.
+        async_path_op_req(T &&);       // Converts T to a filesystem::path, makes it absolute, then converts to an afio::path
+        async_path_op_req(bool, T &&); // If the bool is true, converts T to an afio::path fragment. If false, same as above overload (i.e. make absolute).
+    };
+    
+For convenience, type markup is provided for the boolean taking constructor, these being `async_path_op_req::relative` and
+`async_path_op_req::absolute`.
+
+If the path is relative, then the path of the precondition is used as the base from which the relative path fragment
+operates. On FreeBSD, Linux and Windows this base extension happens inside the kernel and so the current path of the precondition
+really doesn't matter __dash__ it could be changing a thousand times per second and it wouldn't matter. On OS X due
+to lack of the `XXXat()` POSIX APIs the path of the precondition is fetched and the extension done by hand.
+
+An AFIO extension allows you to specify a file as precondition. In this situation, if you specify an empty path
+then you mean the precondition itself which is very useful for deleting or renaming an open file handle. If you want
+a sibling file, this can be found via a path fragment starting with `../`, though note that this necessarily is racy
+(AFIO opens the containing directory of the file, ensuring the directory contains an inode matching the file, and
+then uses that directory handle as a base __dash__ the race here being if the file relocates after matching its
+containing directory).
+
+[heading Gotchas specific to Microsoft Windows]
+
+Finally, there are some gotchas specific to Microsoft Windows:
+
+1. You cannot rename a directory which has an open file handle in any process to any item anywhere within itself or its children.
+
+2. You cannot rename to a destination which has an open file handle with DELETE permissions (`file_flags::Write`)
+to itself or any of its parent directories in any process. You CAN do this from a source like this, but the destination cannot be
+like this (why is this? It is not documented anywhere in Microsoft's documentation, but if I had to guess, I'd suggest that the
+atomicity of the rename is implemented by taking an op lock on the destination, an op lock not granted if any handles exist which
+could change the path suddenly. I'm not sure if Microsoft are themselves aware of this limitation).
+
+One might note that much of the utility of race protecting APIs is lost with these restrictions. However, note that one could
+emulate POSIX semantics by renaming out all the contents of a directory to be renamed to elsewhere, rename the directory, and then
+renaming the contents back in. Given the pathetic slowness of opening handles on Windows, this might seem impossibly inefficient,
+however NT provides a little known `FILE_DELETE_CHILD` permission which gives you delete/rename permission on all the children
+and subchildren of a directory with just one handle open. I learned about this flag the hard way, by it breaking in many subtle ways
+AFIO's functioning on Windows when it was requested by default, something which took several days of head scratching to track down. AFIO doesn't
+currently do this trick of renaming out and back in on Windows, but might in the future after a lot more experimentation as to if
+it is viable and reliable without surprises.
+
+On Windows opening a directory with write access requests rename/delete privileges, whereas on POSIX
+the write access request is ignored for directories as POSIX doesn't allow it anyway. This allows you to write identical code
+which works universally.
+
+As an example of some programming AFIO safely on an extremely unstable filing system, below is the functional test which verifies AFIO
+for filing system race safety.
+As you will see, a worker thread is solely dedicated to renaming directories to unique names whilst the main thread creates files
+inside those constantly changing directories, and relinks them into another directory which is also constantly changing on POSIX, but
+is stable on Windows. This is iterated for a substantial period of time to verify that nothing goes wrong.
+
+[race_protection_example]
+
+[endsect] [/filesystem_races]
+
+
+[section:so_what What benefit does asynchronous file i/o bring me? A demonstration of AFIO's power]
+
+So we can schedule file i/o operations asynchronously with AFIO: what's the benefit of doing that
+instead of creating separate threads of execution and executing the file i/o there instead?
+
+As a quick summary as we're about to prove our case, there are three main benefits to using AFIO
+over doing it by hand:
+
+# You don't have to worry about threading or race conditions or losing error state (as much). AFIO
+does all that for you.
+# On platforms which provide native asynchronous file i/o support and/or native scatter/gather
+file i/o support, AFIO will use that
+instead of issuing multiple filing system operations using a thread pool to achieve
+concurrency. This can very significantly reduce the number of threads needed to keep your
+storage device fully occupied __dash__ remember that ['queue depth] i.e. that metric you see all
+over storage device benchmarks is the number of operations in flight at once, which implies
+the number of threads needed. Most storage devices are IOPS limited due to SATA or SAS
+connection latencies without introducing queue depth __dash__ in particular, modern SSDs cannot
+achieve tens of thousands of IOPS range without substantial queue depths, which without
+using a native asynchronous file i/o API means lots of threads.
+# It's very, very easy to have AFIO turn off file system caching, readahead or buffering
+on a case by case basis which makes writing scalable random synchronous file i/o applications
+much easier.
+
+What these three items mean is that writing scalable high-performance filing system code is much easier.
+Let us take a real world comparative example, this being a simple STL iostreams, Boost Filesystem and OpenMP
+based find regular expression in files implementation:
+
+[find_in_files_iostreams]
+
+This implementation is fairly straightforward: enumerate all files in all directories below
+the current directory into a vector, fire off N threads to open each file, read it entirely
+into memory, regex it for the pattern and if found print the file's path.
+
+Let's now look at the AFIO implementation, and you should prepare yourself because it is far
+more mind bendy due to the many nestings of callbacks needed (it may remind you of WinRT or .NET
+code, everything is asynchronous callback). In the v1.4 engine we ought to gain Fiber support,
+these stackful coroutines are very similar to the resumable functions support coming in C++ 17
+and will let me rewrite the below to be vastly simpler:
+
+[find_in_files_afio]
+
+Here the `find_in_files` class is used to carry state across the callbacks __dash__ one could just
+as equally bind the state into each callback's parameters instead via some sort of pointer to
+a struct. But the difference in complexity is noticeable __dash__ you're probably now asking, why
+choose this hideous complexity over the much clearer OpenMP and iostreams implementation[footnote
+Indeed many ask the same when programming WinRT apps __dash__ Microsoft's insistance on never allowing
+any call to block can make simple designs explode with complexities of nested callbacks.]?
+
+Well, that's simple: do you want maximum file i/o performance? Here is a search for ["Niall] in a
+Boost working directory which contained about 7Gb of data across ~35k files[footnote Test machine
+was a 3.5Ghz Intel i7-3770K Microsoft Windows 8 x64 machine with Seagate ST3320620AS 7200rpm hard
+drive. Note that AFIO has a native WinIOCP backend which leverages host asynchronous file i/o support.]:
+
+[table:find_in_files_performance Find in files performance for traditional vs AFIO implementations
+  [[][iostreams, single threaded][iostreams, OpenMP][Boost.AFIO][Boost.AFIO `file_flags::OSDirect`][Boost.AFIO `file_flags::OSMMap`[footnote The superiority of memory maps on Windows is because all buffered file i/o is done via memory copying to/from memory maps on Windows anyway, so eliminating that memory copy is huge.]]]
+  [[Warm cache][812 Mb/sec][1810 Mb/sec][2663 Mb/sec][N/A][6512 Mb/sec]]
+  [[][+0%][+123%][+228%][][+702%]]
+  [[Cold cache[footnote File cache reset using [@http://technet.microsoft.com/en-us/sysinternals/ff700229.aspx]]][16 Mb/sec][[*8 Mb/sec]][15 Mb/sec][13.14 Mb/sec][24 Mb/sec]]
+  [[][+0%][[*-50%]][-6%][-18%][+50%]]
+]
+
+Note how AFIO outperforms the OpenMP iostreams implementation by about 50% for a warm cache, with only
+a 6% penalty for a cold cache over a single threaded implementation. Note the [*50%] penalty the OpenMP
+iostreams implementation suffers for a cold cache __dash__ a naive multithreaded implementation causes
+a lot of disc seeks. If you map a file into memory using `file_flags::OSMMap`, AFIO will `memcpy()` from
+that map instead of reading __dash__ or of course you can use the map directly using the pointer returned
+by `try_mapfile()`.
+
+The eagle eyed amongst you will have noticed that the AFIO implementation looks hand tuned with a
+special depth first algorithm balancing concurrency with seek locality __dash__ that's because I invested
+two days into achieving maximum possible performance as a demonstration of AFIO's power (and to find
+and fix some bottlenecks). Some might argue that this is therefore not a fair comparison to the OpenMP iostreams
+implementation.
+
+There are two parts to answering this argument. The first is that yes, the OpenMP iostreams search
+algorithm is fairly stupid and simply tries to read as many files as there are CPUs, and those files could
+be stored anywhere on the spinning disc. Because AFIO
+can issue far more concurrent file open and read requests than OpenMP, it gives a lot more scope to
+the filing system to optimise hard drive seeks and satisfy as many requests as is feasible __dash__
+sufficiently so that with a cold cache, AFIO is a little slower than a single threaded iostreams
+implementation where the filing system can spot the access pattern and prefetch quite effectively.
+A completely valid solution to the OpenMP performance deficit would be to increase thread count dramatically.
+
+The second part of answering that argument is this: AFIO's very flexible op chaining structure lets you
+very easily twiddle with the execution dependency graph to achieve maximum possible performance by
+balancing concurrency (too much or too little is slower, what you need is just the right balance)
+and disc seeks (enumerations are best not done in parallel, it defeats any prefetching algorithm),
+unlike the naive OpenMP implementation which is much harder to play around with. Don't get me wrong:
+if you have plenty of time on your hands, you can implement a hand written and tuned find in files
+implementation that is faster than AFIO's implementation, but it will have taken you a lot longer,
+and the code will neither be as portable nor as maintainable.
+
+[endsect] [/so_what]
+
+[endsect] [/quickstart]
